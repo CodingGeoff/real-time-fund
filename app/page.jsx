@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useMemo, useLayoutEffect, useCallback } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
+import { createWorker } from 'tesseract.js';
 import { createAvatar } from '@dicebear/core';
 import { glass } from '@dicebear/collection';
 import dayjs from 'dayjs';
@@ -2478,12 +2479,7 @@ export default function HomePage() {
   const [scanProgress, setScanProgress] = useState({ stage: 'ocr', current: 0, total: 0 }); // stage: ocr | verify
   const abortScanRef = useRef(false); // 终止扫描标记
   const fileInputRef = useRef(null);
-  
-  // 引入 Tesseract
-  const [Tesseract, setTesseract] = useState(null);
-  useEffect(() => {
-    import('tesseract.js').then(mod => setTesseract(mod.default));
-  }, []);
+  const ocrWorkerRef = useRef(null);
 
   const handleScanClick = () => {
     setScanModalOpen(true);
@@ -2499,16 +2495,18 @@ export default function HomePage() {
     abortScanRef.current = true;
     setIsScanning(false);
     setScanProgress({ stage: 'ocr', current: 0, total: 0 });
+    if (ocrWorkerRef.current) {
+      try {
+        ocrWorkerRef.current.terminate();
+      } catch (e) {}
+      ocrWorkerRef.current = null;
+    }
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleFilesUpload = async (event) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
-    if (!Tesseract) {
-      alert('OCR 组件加载中，请稍后重试');
-      return;
-    }
 
     setIsScanning(true);
     setScanModalOpen(false); // 关闭选择弹窗
@@ -2516,6 +2514,55 @@ export default function HomePage() {
     setScanProgress({ stage: 'ocr', current: 0, total: files.length });
     
     try {
+      let worker = ocrWorkerRef.current;
+      if (!worker) {
+        const cdnBases = [
+          'https://cdn.jsdmirror.com/npm',
+          'https://cdn.jsdelivr.net/npm'
+        ];
+        let lastErr = null;
+        for (const base of cdnBases) {
+          try {
+            worker = await createWorker('eng', 1, {
+              workerPath: `${base}/tesseract.js@v7.0.0/dist/worker.min.js`,
+              corePath: `${base}/tesseract.js-core@v7.0.0/tesseract-core-relaxedsimd-lstm.wasm.js`
+            });
+            lastErr = null;
+            break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (lastErr) throw lastErr;
+        ocrWorkerRef.current = worker;
+      }
+
+      const recognizeWithTimeout = async (file, ms) => {
+        let timer = null;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('OCR_TIMEOUT')), ms);
+        });
+        try {
+          return await Promise.race([worker.recognize(file), timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
+      const searchFundsWithTimeout = async (val, ms) => {
+        let timer = null;
+        const timeout = new Promise((resolve) => {
+          timer = setTimeout(() => resolve([]), ms);
+        });
+        try {
+          return await Promise.race([searchFunds(val), timeout]);
+        } catch (e) {
+          return [];
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
       const allCodes = new Set();
       for (let i = 0; i < files.length; i++) {
         if (abortScanRef.current) break;
@@ -2524,7 +2571,22 @@ export default function HomePage() {
         // 更新进度：正在处理第 i+1 张
         setScanProgress(prev => ({ ...prev, current: i + 1 }));
         
-        const { data: { text } } = await Tesseract.recognize(f, 'eng'); // 这里使用英文解析能提升速度
+        let text = '';
+        try {
+          const res = await recognizeWithTimeout(f, 30000);
+          text = res?.data?.text || '';
+        } catch (e) {
+          if (String(e?.message || '').includes('OCR_TIMEOUT')) {
+            if (worker) {
+              try {
+                await worker.terminate();
+              } catch (err) {}
+              ocrWorkerRef.current = null;
+            }
+            throw e;
+          }
+          text = '';
+        }
         const matches = text.match(/\b\d{6}\b/g) || [];
         matches.forEach(c => allCodes.add(c));
       }
@@ -2546,7 +2608,7 @@ export default function HomePage() {
 
         let found = null;
         try {
-          const list = await searchFunds(code);
+          const list = await searchFundsWithTimeout(code, 8000);
           found = Array.isArray(list) ? list.find(d => d.CODE === code) : null;
         } catch (e) {
           found = null;

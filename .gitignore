@@ -84,3 +84,4 @@ fabric.properties
 .env.local
 .DS_Store
 .idea
+.husky/_/

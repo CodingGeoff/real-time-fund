@@ -176,7 +176,6 @@ export default function HoldingEditModal({ fund, holding, onClose, onSave }) {
                 </label>
                 <input
                   type="number"
-                  inputMode="decimal"
                   step="any"
                   className="input"
                   value={profit}
